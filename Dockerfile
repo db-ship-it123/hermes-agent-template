@@ -35,8 +35,6 @@ RUN chmod +x /entrypoint.sh
 # Copy config template
 COPY config.yaml.template /opt/config.yaml.template
 
-# Hermes data directory
-VOLUME ["/opt/data"]
 ENV HERMES_HOME=/opt/data
 
 ENTRYPOINT ["/entrypoint.sh"]
