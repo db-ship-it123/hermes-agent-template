@@ -611,7 +611,7 @@
           <div class="toggle-body" x-show="channelsEnabled.telegram">
             <div class="field-grid-2">
               <div><label class="field-label">Bot Token</label><input type="password" :value="vars.TELEGRAM_BOT_TOKEN||''" @input="vars.TELEGRAM_BOT_TOKEN=$event.target.value" placeholder="From @BotFather"></div>
-              <div><label class="field-label">Allowed User IDs</label><input type="text" :value="vars.TELEGRAM_ALLOWED_USERS||''" @input="vars.TELEGRAM_ALLOWED_USERS=$event.target.value" placeholder="123456,789012"></div>
+              <div><label class="field-label">Allowed User IDs</label><input type="text" :value="vars.TELEGRAM_ALLOWED_USERS||''" @input="vars.TELEGRAM_ALLOWED_USERS=$event.target.value" placeholder="123456,789012"><p class="hint">Use <code>*</code> to allow all users</p></div>
             </div>
           </div>
 
@@ -624,7 +624,7 @@
           <div class="toggle-body" x-show="channelsEnabled.discord">
             <div class="field-grid-2">
               <div><label class="field-label">Bot Token</label><input type="password" :value="vars.DISCORD_BOT_TOKEN||''" @input="vars.DISCORD_BOT_TOKEN=$event.target.value"></div>
-              <div><label class="field-label">Allowed User IDs</label><input type="text" :value="vars.DISCORD_ALLOWED_USERS||''" @input="vars.DISCORD_ALLOWED_USERS=$event.target.value"></div>
+              <div><label class="field-label">Allowed User IDs</label><input type="text" :value="vars.DISCORD_ALLOWED_USERS||''" @input="vars.DISCORD_ALLOWED_USERS=$event.target.value" placeholder="123456,789012"><p class="hint">Use <code>*</code> to allow all users</p></div>
             </div>
           </div>
 
