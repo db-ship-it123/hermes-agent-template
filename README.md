@@ -6,8 +6,7 @@ Deploy [Hermes Agent](https://github.com/NousResearch/hermes-agent) on [Railway]
 
 > Hermes Agent is an autonomous AI agent by [Nous Research](https://nousresearch.com/) that lives on your server, connects to your messaging channels (Telegram, Discord, Slack, etc.), and gets more capable the longer it runs.
 
-<!-- TODO: Add dashboard screenshot -->
-<!-- ![Dashboard](docs/dashboard.png) -->
+![Dashboard](https://res.cloudinary.com/asset-cloudinary/image/upload/v1774992146/hermes-home-page_hnm12e.png)
 
 ## Features
 
@@ -71,7 +70,7 @@ All other configuration (LLM provider, model, channels, tools) is managed throug
 
 ## Supported Providers
 
-OpenRouter, DeepSeek, DashScope, GLM / Z.AI, Kimi, MiniMax, HuggingFace
+OpenAI, Anthropic, Google Gemini, OpenRouter, DeepSeek, DashScope, GLM / Z.AI, Kimi, MiniMax, HuggingFace
 
 ## Supported Channels
 
