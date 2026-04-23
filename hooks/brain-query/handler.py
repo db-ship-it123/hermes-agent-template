@@ -33,7 +33,7 @@ logger = logging.getLogger("hooks.brain-query")
 # gets dropped.
 QUERY_TIMEOUT_S = 3.0
 MAX_RESULTS = 5
-SNIPPET_CHARS = 240
+SNIPPET_CHARS = 500
 # Ignore extremely short / trivial messages — no point querying for "ok".
 MIN_QUERY_CHARS = 4
 
@@ -68,15 +68,20 @@ def _parse_query_output(stdout: str) -> list[dict]:
 def _format_additions(hits: list[dict]) -> str:
     """Build the markdown block that gets appended to the system prompt."""
     lines = [
-        "RELEVANT BRAIN CONTEXT (consulted before replying, per brain-ops skill):",
+        "RELEVANT BRAIN CONTEXT (your persistent long-term memory):",
+        "These pages are from Dale's own knowledge base and represent facts you know about him, his projects, his world, and his collaborators. Treat them as authoritative. Read them carefully BEFORE forming your reply.",
+        "",
     ]
     for h in hits[:MAX_RESULTS]:
         snippet = h["snippet"][:SNIPPET_CHARS].rstrip()
-        lines.append(f"- [{h['slug']}]: {snippet} (score: {h['score']:.2f})")
+        lines.append(f"- [{h['slug']}] (score {h['score']:.2f}): {snippet}")
+    lines.append("")
     lines.append(
-        "Use these when relevant and cite the slug inline like [slug]. "
-        "If none of these answer the question, say so and reply from general "
-        "knowledge."
+        "RULES for using this context:\n"
+        "1. If the user's question is answered by ANY of these pages, cite the slug inline like [slug] and answer from it — do NOT say 'I don't know' or 'session history only goes back to…'.\n"
+        "2. A page at score >= 0.40 is relevant; lower scores may still be relevant by topic.\n"
+        "3. Only fall back to general knowledge if NONE of the pages are on-topic. In that case, say so explicitly ('the brain doesn't have info on X, so from general knowledge…').\n"
+        "4. Never fabricate facts about Dale, his projects, or people in his world — if it's not above, say it's not in the brain."
     )
     return "\n".join(lines)
 
