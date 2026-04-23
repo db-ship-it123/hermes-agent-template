@@ -348,7 +348,6 @@ button:hover{background:#7b8fff;border-color:#7b8fff}
     <input id="password" name="password" type="password" autocomplete="current-password" required>
     <button type="submit">Sign in</button>
   </form>
-  <p class="footnote">Credentials are the <code>ADMIN_USERNAME</code> and <code>ADMIN_PASSWORD</code><br>Railway service variables.</p>
 </div>
 </body></html>"""
 
