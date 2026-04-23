@@ -13,7 +13,10 @@ RUN apt-get update && \
 # Deleting web/ afterwards makes hermes's internal _build_web_ui skip the
 # rebuild step (it early-returns when package.json is absent), so container
 # startup is fast and no runtime npm dependency is needed.
-RUN git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /opt/hermes-agent && \
+# Use our fork (db-ship-it123/hermes-agent) so the gateway agent:start hook
+# extension (context_prompt_additions) is available — required by the
+# brain-query hook installed below.
+RUN git clone --depth 1 https://github.com/db-ship-it123/hermes-agent.git /opt/hermes-agent && \
     cd /opt/hermes-agent && \
     uv pip install --system --no-cache -e ".[all]" && \
     cd /opt/hermes-agent/web && \
@@ -42,6 +45,7 @@ RUN mkdir -p /data/.hermes /data/brain /data/.gbrain
 
 COPY server.py /app/server.py
 COPY templates/ /app/templates/
+COPY hooks/ /app/hooks/
 COPY start.sh /app/start.sh
 RUN chmod +x /app/start.sh
 

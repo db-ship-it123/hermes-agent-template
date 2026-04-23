@@ -1,0 +1,8 @@
+name: brain-query
+description: |
+  Brain-first lookup per gbrain skills/brain-ops/SKILL.md. On every agent:start,
+  run `gbrain query "<user_message>" --no-expand`, parse top-N results, and
+  append a "RELEVANT BRAIN CONTEXT" block to the system prompt so the model
+  can cite brain pages instead of answering from general knowledge.
+events:
+  - agent:start

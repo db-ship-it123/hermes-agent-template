@@ -16,6 +16,20 @@ fi
 
 [ ! -f /data/.hermes/.env ] && touch /data/.hermes/.env
 
+# ── Install Hermes hooks ──────────────────────────────────────────────────────
+# Copy bundled hooks (brain-query, etc.) into the hermes runtime hooks dir on
+# every boot. Overwrite is safe — these are source-of-truth, not user-edited.
+if [ -d /app/hooks ]; then
+  for hook_dir in /app/hooks/*/; do
+    [ -d "$hook_dir" ] || continue
+    hook_name=$(basename "$hook_dir")
+    mkdir -p "/data/.hermes/hooks/$hook_name"
+    cp -f "$hook_dir"HOOK.yaml "$hook_dir"handler.py \
+      "/data/.hermes/hooks/$hook_name/" 2>/dev/null || true
+    echo "[hooks] Installed $hook_name → /data/.hermes/hooks/$hook_name/"
+  done
+fi
+
 # ── gbrain boot ───────────────────────────────────────────────────────────────
 # Canonical gbrain deployment: local PGLite on this container, brain content
 # synced from db-ship-it123/brain via git. No shared Postgres, no HTTP bridge.
