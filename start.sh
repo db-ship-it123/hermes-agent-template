@@ -17,10 +17,10 @@ fi
 [ ! -f /data/.hermes/.env ] && touch /data/.hermes/.env
 
 # ── gbrain boot ───────────────────────────────────────────────────────────────
-# This is the "On an agent platform (recommended)" path: gbrain lives inside
-# the Hermes container. Brain content syncs from db-ship-it123/brain (private).
-# PGLite DB + embeddings persist to /data (Railway volume). OPENAI_API_KEY,
-# GBRAIN_HTTP_TOKEN, and GITHUB_TOKEN must be set in Railway env.
+# Canonical gbrain deployment: local PGLite on this container, brain content
+# synced from db-ship-it123/brain via git. No shared Postgres, no HTTP bridge.
+# Jarvis (inside Hermes) calls `gbrain` CLI directly for brain access.
+# Required env: OPENAI_API_KEY, GITHUB_TOKEN.
 export GBRAIN_DB_DIR=/data/.gbrain
 export GBRAIN_BRAIN_DIR=/data/brain
 mkdir -p "$GBRAIN_DB_DIR" "$GBRAIN_BRAIN_DIR"
@@ -34,15 +34,21 @@ if [ -z "$(ls -A "$GBRAIN_BRAIN_DIR" 2>/dev/null)" ]; then
   else
     echo "[gbrain] WARN: GITHUB_TOKEN unset — cannot clone private brain repo. Set it in Railway env."
   fi
+else
+  # Repo already cloned — make sure it can pull later without prompting.
+  if [ -n "$GITHUB_TOKEN" ] && [ -d "$GBRAIN_BRAIN_DIR/.git" ]; then
+    git -C "$GBRAIN_BRAIN_DIR" remote set-url origin \
+      "https://db-ship-it123:${GITHUB_TOKEN}@github.com/db-ship-it123/brain.git" || true
+  fi
 fi
 
-# 2) Initialize PGLite DB on first boot.
+# 2) Initialize PGLite DB on first boot (idempotent).
 if [ ! -f "$GBRAIN_DB_DIR/brain.pglite" ]; then
   echo "[gbrain] Initializing PGLite DB at $GBRAIN_DB_DIR ..."
   gbrain init --yes || echo "[gbrain] WARN: init failed — check logs."
 fi
 
-# 3) Import + embed. Only meaningful if brain was cloned and OPENAI_API_KEY set.
+# 3) Initial import + embed.
 if [ -n "$(ls -A "$GBRAIN_BRAIN_DIR" 2>/dev/null)" ]; then
   echo "[gbrain] Importing $GBRAIN_BRAIN_DIR (no-embed) ..."
   gbrain import "$GBRAIN_BRAIN_DIR" --no-embed || echo "[gbrain] WARN: import failed."
@@ -54,8 +60,21 @@ if [ -n "$(ls -A "$GBRAIN_BRAIN_DIR" 2>/dev/null)" ]; then
   fi
 fi
 
-# The MCP server runs as a subprocess spawned by server.py (lifespan hook),
-# bridged over /gbrain/mcp HTTP endpoint with Bearer auth (GBRAIN_HTTP_TOKEN).
-echo "[gbrain] Boot complete. MCP bridge will start with Hermes server."
+# 4) Background sync loop: pull latest brain from git every 15 min and re-embed.
+# Dale edits ~/brain on the laptop + pushes; this container picks it up.
+(
+  while true; do
+    sleep 900
+    if [ -d "$GBRAIN_BRAIN_DIR/.git" ]; then
+      git -C "$GBRAIN_BRAIN_DIR" pull --quiet 2>/dev/null && \
+        gbrain sync --repo "$GBRAIN_BRAIN_DIR" >/dev/null 2>&1 && \
+        gbrain embed --stale >/dev/null 2>&1 && \
+        echo "[gbrain-sync] $(date -u +%FT%TZ) pulled + synced + embedded" || \
+        echo "[gbrain-sync] $(date -u +%FT%TZ) sync cycle had errors"
+    fi
+  done
+) &
+
+echo "[gbrain] Boot complete. Sync loop running in background (15-min interval)."
 
 exec python /app/server.py
