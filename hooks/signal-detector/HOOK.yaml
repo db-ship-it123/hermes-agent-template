@@ -1,0 +1,9 @@
+name: signal-detector
+description: |
+  Always-on ambient signal capture per gbrain skills/signal-detector/SKILL.md.
+  On every agent:start, spawns a detached background task that appends the raw
+  inbound message to today's signal-capture page in the brain. The nightly
+  dream cycle (Phase 1: Entity Sweep) picks those up and does the LLM-driven
+  entity/idea enrichment. Never blocks the main reply.
+events:
+  - agent:start
