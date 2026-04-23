@@ -24,7 +24,21 @@ RUN git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /opt/he
 COPY requirements.txt /app/requirements.txt
 RUN uv pip install --system --no-cache -r /app/requirements.txt
 
-RUN mkdir -p /data/.hermes
+# ── gbrain: the "On an agent platform (recommended)" path ─────────────────────
+# Install bun, clone db-ship-it123/gbrain, run bun install, and symlink the CLI
+# so `gbrain` is on PATH. `gbrain init` runs at runtime in start.sh (needs
+# the /data volume). Brain content is cloned from the private db-ship-it123/brain
+# repo at boot using GITHUB_TOKEN (set via Railway env vars).
+RUN curl -fsSL https://bun.sh/install | bash && \
+    ln -sf /root/.bun/bin/bun /usr/local/bin/bun && \
+    git clone --depth 1 https://github.com/db-ship-it123/gbrain.git /opt/gbrain && \
+    cd /opt/gbrain && \
+    bun install --frozen-lockfile && \
+    ln -sf /opt/gbrain/src/cli.ts /usr/local/bin/gbrain && \
+    chmod +x /opt/gbrain/src/cli.ts
+ENV PATH="/root/.bun/bin:${PATH}"
+
+RUN mkdir -p /data/.hermes /data/brain /data/.gbrain
 
 COPY server.py /app/server.py
 COPY templates/ /app/templates/

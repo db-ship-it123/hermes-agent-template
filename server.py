@@ -112,6 +112,11 @@ ENV_VARS = [
     ("GATEWAY_ALLOW_ALL_USERS",  "Allow all users",          "gateway",   False),
     ("ADMIN_USERNAME",           "Admin username",           "admin",     False),
     ("ADMIN_PASSWORD",           "Admin password",           "admin",     True),
+    # GBrain remote MCP (Dale's laptop brain via Tailscale Funnel / ngrok / etc).
+    # When both URL + token are set, write_config_yaml wires gbrain in as an
+    # HTTP MCP server so the Hermes agent can call brain tools.
+    ("GBRAIN_MCP_URL",           "GBrain MCP URL",           "mcp",       False),
+    ("GBRAIN_MCP_TOKEN",         "GBrain MCP Bearer token",  "mcp",       True),
 ]
 
 SECRET_KEYS  = {k for k, _, _, s in ENV_VARS if s}
@@ -145,10 +150,33 @@ def read_env(path: Path) -> dict[str, str]:
 
 
 def write_config_yaml(data: dict[str, str]) -> None:
-    """Write a minimal config.yaml so hermes picks up the model and provider."""
+    """Write a minimal config.yaml so hermes picks up the model and provider.
+
+    When GBRAIN_MCP_URL + GBRAIN_MCP_TOKEN are both set, we append an
+    ``mcp_servers.gbrain`` entry so the Hermes agent can call brain tools.
+    """
     model = data.get("LLM_MODEL", "")
     config_path = Path(HERMES_HOME) / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    gbrain_url = data.get("GBRAIN_MCP_URL", "").strip()
+    gbrain_token = data.get("GBRAIN_MCP_TOKEN", "").strip()
+    mcp_block = ""
+    if gbrain_url and gbrain_token:
+        # YAML indentation matters — keep two-space nesting consistent.
+        # Single-quote the token so special characters don't break parsing.
+        safe_token = gbrain_token.replace("'", "''")
+        safe_url = gbrain_url.replace('"', '\\"')
+        mcp_block = (
+            "\nmcp_servers:\n"
+            "  gbrain:\n"
+            f'    url: "{safe_url}"\n'
+            "    headers:\n"
+            f"      Authorization: 'Bearer {safe_token}'\n"
+            "    timeout: 180\n"
+            "    connect_timeout: 30\n"
+        )
+
     config_path.write_text(f"""\
 model:
   default: "{model}"
@@ -163,7 +191,7 @@ agent:
   max_iterations: 50
 
 data_dir: "{HERMES_HOME}"
-""")
+{mcp_block}""")
 
 
 def write_env(path: Path, data: dict[str, str]) -> None:
@@ -875,6 +903,107 @@ async def route_setup_404(request: Request) -> Response:
     return Response("Not Found", status_code=404, media_type="text/plain")
 
 
+# ── GBrain HTTP↔stdio MCP bridge ──────────────────────────────────────────────
+# `gbrain serve` only speaks stdio MCP. To expose it to Claude Code as a remote
+# HTTP MCP, we spawn one long-lived `gbrain serve` subprocess and proxy each
+# POSTed JSON-RPC request over its stdin, reading the single-line JSON response
+# off stdout. A lock serializes requests so responses map 1:1 to writes.
+#
+# Route: POST /gbrain/mcp
+# Auth:  Authorization: Bearer $GBRAIN_HTTP_TOKEN
+class GBrainBridge:
+    def __init__(self):
+        self.proc: asyncio.subprocess.Process | None = None
+        self.lock = asyncio.Lock()
+
+    async def start(self):
+        env = os.environ.copy()
+        env.setdefault("GBRAIN_DB_DIR", "/data/.gbrain")
+        env.setdefault("GBRAIN_BRAIN_DIR", "/data/brain")
+        try:
+            self.proc = await asyncio.create_subprocess_exec(
+                "gbrain", "serve",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+            # Drain stderr in the background so it never blocks.
+            asyncio.create_task(self._drain_stderr())
+            print("[gbrain-bridge] gbrain serve subprocess started", flush=True)
+        except FileNotFoundError:
+            print("[gbrain-bridge] WARN: `gbrain` not on PATH — bridge disabled", flush=True)
+            self.proc = None
+        except Exception as e:
+            print(f"[gbrain-bridge] WARN: failed to spawn gbrain serve: {e}", flush=True)
+            self.proc = None
+
+    async def _drain_stderr(self):
+        if not self.proc or not self.proc.stderr:
+            return
+        while True:
+            line = await self.proc.stderr.readline()
+            if not line:
+                break
+            try:
+                print(f"[gbrain-bridge/stderr] {line.decode('utf-8', 'replace').rstrip()}", flush=True)
+            except Exception:
+                pass
+
+    async def stop(self):
+        if self.proc and self.proc.returncode is None:
+            try:
+                self.proc.terminate()
+                await asyncio.wait_for(self.proc.wait(), timeout=5)
+            except Exception:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+        self.proc = None
+
+    async def call(self, payload: dict) -> dict:
+        if not self.proc or self.proc.returncode is not None:
+            await self.start()
+        if not self.proc or not self.proc.stdin or not self.proc.stdout:
+            raise RuntimeError("gbrain bridge not running")
+        line = (json.dumps(payload) + "\n").encode("utf-8")
+        async with self.lock:
+            self.proc.stdin.write(line)
+            await self.proc.stdin.drain()
+            resp_line = await self.proc.stdout.readline()
+        if not resp_line:
+            raise RuntimeError("gbrain bridge closed")
+        return json.loads(resp_line.decode("utf-8"))
+
+
+gbrain_bridge = GBrainBridge()
+
+
+async def route_gbrain_mcp(request: Request) -> Response:
+    """Remote HTTP MCP endpoint — proxies JSON-RPC over the stdio subprocess.
+
+    Auth is a fixed Bearer token (GBRAIN_HTTP_TOKEN env var), *not* cookies —
+    Claude Code's `claude mcp add --transport http ... --header "Authorization: Bearer X"`
+    only attaches a static header.
+    """
+    expected = os.environ.get("GBRAIN_HTTP_TOKEN", "")
+    if not expected:
+        return JSONResponse({"error": "GBRAIN_HTTP_TOKEN not configured"}, status_code=503)
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("bearer ") or auth.split(None, 1)[1].strip() != expected:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    try:
+        resp = await gbrain_bridge.call(payload)
+        return JSONResponse(resp)
+    except Exception as e:
+        return JSONResponse({"error": f"bridge error: {e}"}, status_code=502)
+
+
 # ── App lifecycle ─────────────────────────────────────────────────────────────
 async def auto_start():
     if is_config_complete():
@@ -888,6 +1017,7 @@ async def lifespan(app):
     # Dashboard runs always — it's the user-facing UI after setup is done,
     # and it's independent of gateway state.
     asyncio.create_task(dash.start())
+    asyncio.create_task(gbrain_bridge.start())
     await auto_start()
     try:
         yield
@@ -895,6 +1025,7 @@ async def lifespan(app):
         await asyncio.gather(
             gw.stop(),
             dash.stop(),
+            gbrain_bridge.stop(),
             return_exceptions=True,
         )
         global _http_client
@@ -911,6 +1042,10 @@ routes = [
     Route("/login",                             page_login,          methods=["GET"]),
     Route("/login",                             login_post,          methods=["POST"]),
     Route("/logout",                            logout),
+
+    # Remote MCP bridge for gbrain — Bearer-auth'd (not cookie-auth'd) because
+    # Claude Code's remote MCP client only attaches a static Authorization header.
+    Route("/gbrain/mcp",                        route_gbrain_mcp,    methods=["POST"]),
 
     # Our setup wizard + management API, all under /setup/* (cookie-auth guarded).
     Route("/setup",                             page_index),
