@@ -32,7 +32,14 @@ logger = logging.getLogger("hooks.brain-query")
 # every Telegram reply. 3s covers a cold pg-lite read; anything over budget
 # gets dropped.
 QUERY_TIMEOUT_S = 3.0
+GET_TIMEOUT_S = 2.0
 MAX_RESULTS = 5
+# Size of the full-page excerpt we fetch per hit via `gbrain get`. Needs to
+# clear the frontmatter + exec summary + State block so cross-reference lines
+# (e.g., "Current project: [[dbpersonal]]") land inside the injected context.
+PAGE_CHARS = 1500
+# Fallback when `gbrain get` is unavailable or slow — truncate the short
+# query-snippet to this many chars.
 SNIPPET_CHARS = 500
 # Ignore extremely short / trivial messages — no point querying for "ok".
 MIN_QUERY_CHARS = 4
@@ -73,9 +80,11 @@ def _format_additions(hits: list[dict]) -> str:
         "",
     ]
     for h in hits[:MAX_RESULTS]:
-        snippet = h["snippet"][:SNIPPET_CHARS].rstrip()
-        lines.append(f"- [{h['slug']}] (score {h['score']:.2f}): {snippet}")
-    lines.append("")
+        body = h.get("body") or h.get("snippet") or ""
+        body = body[:PAGE_CHARS].rstrip()
+        lines.append(f"### [{h['slug']}] (score {h['score']:.2f})")
+        lines.append(body)
+        lines.append("")
     lines.append(
         "RULES for using this context:\n"
         "1. If the user's question is answered by ANY of these pages, cite the slug inline like [slug] and answer from it — do NOT say 'I don't know' or 'session history only goes back to…'.\n"
@@ -104,6 +113,34 @@ async def _run_gbrain_query(query: str) -> tuple[str, int]:
             pass
         raise
     return stdout_b.decode("utf-8", errors="replace"), proc.returncode or 0
+
+
+async def _run_gbrain_get(slug: str) -> str | None:
+    """Invoke `gbrain get <slug>` to fetch the full page. Returns body or None."""
+    proc = await asyncio.create_subprocess_exec(
+        "gbrain", "get", slug,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout_b, _ = await asyncio.wait_for(
+            proc.communicate(), timeout=GET_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        return None
+    if proc.returncode and proc.returncode != 0:
+        return None
+    body = stdout_b.decode("utf-8", errors="replace")
+    # Strip leading YAML frontmatter block if present, to save context budget.
+    if body.startswith("---"):
+        end = body.find("\n---\n", 3)
+        if end != -1:
+            body = body[end + 5:]
+    return body.strip()
 
 
 async def handle(event_type: str, context: dict) -> None:
@@ -152,7 +189,19 @@ async def handle(event_type: str, context: dict) -> None:
         if not hits:
             return
 
-        additions.append(_format_additions(hits))
+        # Enrich top hits with full page bodies (fetch in parallel, bounded by
+        # MAX_RESULTS). If `gbrain get` fails or times out for a hit, we fall
+        # back to the query snippet for that hit.
+        top = hits[:MAX_RESULTS]
+        bodies = await asyncio.gather(
+            *(_run_gbrain_get(h["slug"]) for h in top),
+            return_exceptions=True,
+        )
+        for h, body in zip(top, bodies):
+            if isinstance(body, str) and body:
+                h["body"] = body
+
+        additions.append(_format_additions(top))
 
     except asyncio.TimeoutError:
         latency_ms = int((time.monotonic() - t0) * 1000)
