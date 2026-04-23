@@ -1,0 +1,77 @@
+name: Sync from upstream
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Detect local default branch
+        id: local
+        run: echo "branch=$(git symbolic-ref --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Add upstream + fetch
+        env:
+          UPSTREAM_URL: ${{ vars.UPSTREAM_URL }}
+        run: |
+          if [ -z "$UPSTREAM_URL" ]; then
+            echo "ERROR: vars.UPSTREAM_URL is not set on this repo." >&2
+            exit 1
+          fi
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch upstream
+
+      - name: Detect upstream default branch
+        id: upstream
+        run: echo "branch=$(git remote show upstream | sed -n 's/.*HEAD branch: //p')" >> "$GITHUB_OUTPUT"
+
+      - name: Count ahead + open PR if needed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LOCAL_BRANCH: ${{ steps.local.outputs.branch }}
+          UPSTREAM_BRANCH: ${{ steps.upstream.outputs.branch }}
+        run: |
+          set -e
+          git config user.name "upstream-sync-bot"
+          git config user.email "upstream-sync-bot@users.noreply.github.com"
+
+          AHEAD=$(git rev-list "HEAD..upstream/$UPSTREAM_BRANCH" --count)
+          echo "Upstream is $AHEAD commits ahead of $LOCAL_BRANCH."
+
+          if [ "$AHEAD" = "0" ]; then
+            echo "Nothing to sync."
+            exit 0
+          fi
+
+          EXISTING=$(gh pr list --head sync/upstream --state open --json number --jq '.[0].number' || true)
+          if [ -n "$EXISTING" ]; then
+            echo "Sync PR #$EXISTING already open — skipping."
+            exit 0
+          fi
+
+          git checkout -B sync/upstream "upstream/$UPSTREAM_BRANCH"
+          git push -f origin sync/upstream
+
+          COMMITS=$(git log --oneline "origin/$LOCAL_BRANCH..upstream/$UPSTREAM_BRANCH" | head -20)
+          BODY=$(printf '%s\n\n%s\n\n%s\n```\n%s\n```\n' \
+            "Automated daily check detected $AHEAD new upstream commits on \`upstream/$UPSTREAM_BRANCH\`." \
+            "**Review and merge manually.** Do not auto-merge — this fork is deployed and needs human review first." \
+            "Recent commits:" \
+            "$COMMITS")
+
+          gh pr create \
+            --base "$LOCAL_BRANCH" \
+            --head sync/upstream \
+            --title "chore: $AHEAD new commits from upstream/$UPSTREAM_BRANCH" \
+            --body "$BODY"
