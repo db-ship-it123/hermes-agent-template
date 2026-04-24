@@ -414,10 +414,16 @@ class Gateway:
         self.logs: deque[str] = deque(maxlen=500)
         self.started_at: float | None = None
         self.restarts = 0
+        self._restart_attempts: int = 0
 
     async def start(self):
         if self.proc and self.proc.returncode is None:
             return
+        # Reset auto-restart counter on user-initiated start (not mid-backoff).
+        # A deliberate start from "stopped" or "error" means the operator is
+        # taking over — clear the surrender flag so auto-restart works again.
+        if self.state in ("stopped", "error"):
+            self._restart_attempts = 0
         self.state = "starting"
         try:
             # .env values take priority over Railway env vars.
@@ -438,16 +444,25 @@ class Gateway:
             )
             self.state = "running"
             self.started_at = time.time()
+            print(f"[gateway] spawned pid={self.proc.pid}", flush=True)
             asyncio.create_task(self._drain())
+            # If the gateway stays up for 60s, consider recovery successful
+            # and zero the attempt counter.
+            asyncio.create_task(self._reset_attempts_after(60))
         except Exception as e:
             self.state = "error"
-            self.logs.append(f"[error] Failed to start: {e}")
+            msg = f"[error] Failed to start: {e}"
+            self.logs.append(msg)
+            print(f"[gateway] {msg}", flush=True)
 
     async def stop(self):
         if not self.proc or self.proc.returncode is not None:
             self.state = "stopped"
             return
         self.state = "stopping"
+        # Flag this as a deliberate stop so _drain() won't auto-restart.
+        # Using the cap value blocks _schedule_restart() from firing.
+        self._restart_attempts = 8
         self.proc.terminate()
         try:
             await asyncio.wait_for(self.proc.wait(), timeout=10)
@@ -460,6 +475,9 @@ class Gateway:
     async def restart(self):
         await self.stop()
         self.restarts += 1
+        # User-initiated restart: clear surrender flag set by stop().
+        self._restart_attempts = 0
+        self.state = "stopped"
         await self.start()
 
     async def _drain(self):
@@ -467,9 +485,62 @@ class Gateway:
         async for raw in self.proc.stdout:
             line = ANSI_ESCAPE.sub("", raw.decode(errors="replace").rstrip())
             self.logs.append(line)
+            print(f"[gateway] {line}", flush=True)
+        # stdout closed — wait for the process so returncode is populated.
+        try:
+            rc = await self.proc.wait()
+        except Exception:
+            rc = self.proc.returncode
+        print(f"[gateway] EXITED code={rc}", flush=True)
+        if rc == -9:
+            print(
+                "[gateway] exit -9 = SIGKILL — almost certainly OOM. "
+                "Raise Railway memory or reduce boot-time footprint.",
+                flush=True,
+            )
+        # Only auto-restart if this wasn't a deliberate stop.
         if self.state == "running":
             self.state = "error"
-            self.logs.append(f"[error] Gateway exited (code {self.proc.returncode})")
+            self.logs.append(f"[error] Gateway exited (code {rc})")
+            asyncio.create_task(self._schedule_restart())
+        # else: state is "stopping" / "stopped" → respect operator intent.
+
+    async def _schedule_restart(self):
+        """Exponential-backoff auto-restart. Caps at 8 consecutive attempts."""
+        if self._restart_attempts >= 8:
+            self.state = "error"
+            msg = (
+                "[gateway] giving up auto-restart after 8 attempts — "
+                "fix the root cause (likely OOM) and restart manually via "
+                "/setup/api/gateway/restart"
+            )
+            self.logs.append(msg)
+            print(msg, flush=True)
+            return
+        delay = min(120, 5 * (2 ** self._restart_attempts))
+        self._restart_attempts += 1
+        self.restarts += 1
+        print(
+            f"[gateway] auto-restart in {delay}s (attempt {self._restart_attempts}/8)",
+            flush=True,
+        )
+        await asyncio.sleep(delay)
+        # Respect any operator action that happened during the sleep.
+        if self.state in ("stopping", "stopped"):
+            print("[gateway] auto-restart aborted — state changed during backoff", flush=True)
+            return
+        await self.start()
+
+    async def _reset_attempts_after(self, seconds: int):
+        """After `seconds` of continuous running, zero the attempt counter."""
+        await asyncio.sleep(seconds)
+        if self.proc and self.proc.returncode is None and self.state == "running":
+            if self._restart_attempts:
+                print(
+                    f"[gateway] stable for {seconds}s — resetting auto-restart counter",
+                    flush=True,
+                )
+            self._restart_attempts = 0
 
     def status(self) -> dict:
         uptime = int(time.time() - self.started_at) if self.started_at and self.state == "running" else None
