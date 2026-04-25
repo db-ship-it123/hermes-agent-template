@@ -506,22 +506,14 @@ class Gateway:
         # else: state is "stopping" / "stopped" → respect operator intent.
 
     async def _schedule_restart(self):
-        """Exponential-backoff auto-restart. Caps at 8 consecutive attempts."""
-        if self._restart_attempts >= 8:
-            self.state = "error"
-            msg = (
-                "[gateway] giving up auto-restart after 8 attempts — "
-                "fix the root cause (likely OOM) and restart manually via "
-                "/setup/api/gateway/restart"
-            )
-            self.logs.append(msg)
-            print(msg, flush=True)
-            return
-        delay = min(120, 5 * (2 ** self._restart_attempts))
+        """Exponential-backoff auto-restart. Never gives up — capped at 5 min
+        between attempts. Telegram users only get a reply if the gateway is
+        running, so silent surrender is worse than a slow recovery."""
+        delay = min(300, 5 * (2 ** min(self._restart_attempts, 6)))
         self._restart_attempts += 1
         self.restarts += 1
         print(
-            f"[gateway] auto-restart in {delay}s (attempt {self._restart_attempts}/8)",
+            f"[gateway] auto-restart in {delay}s (attempt {self._restart_attempts})",
             flush=True,
         )
         await asyncio.sleep(delay)

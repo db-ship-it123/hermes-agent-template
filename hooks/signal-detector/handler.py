@@ -70,18 +70,28 @@ async def _capture(message: str, platform: str, user_id: str, session_id: str) -
     slug = _today_slug()
     entry = _format_entry(message, platform, user_id, session_id)
 
-    # Read existing body (may be empty / missing).
+    # Read existing body (may be empty / missing). Kill on timeout so we don't
+    # leak a hung gbrain subprocess if PGLite's single-writer lock is held.
     existing = ""
+    get_proc = None
     try:
         get_proc = await asyncio.create_subprocess_exec(
             "gbrain", "get", slug,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         out, _ = await asyncio.wait_for(get_proc.communicate(), timeout=3.0)
         if get_proc.returncode == 0:
             existing = out.decode("utf-8", errors="replace")
-    except (asyncio.TimeoutError, FileNotFoundError, Exception):
+    except asyncio.TimeoutError:
+        if get_proc is not None:
+            try:
+                get_proc.kill()
+                await get_proc.wait()
+            except ProcessLookupError:
+                pass
+        existing = ""
+    except (FileNotFoundError, Exception):
         existing = ""
 
     # Build full content. If the page is new, seed frontmatter + header.
@@ -102,29 +112,40 @@ async def _capture(message: str, platform: str, user_id: str, session_id: str) -
     else:
         body = existing.rstrip() + "\n" + entry
 
-    # Write back via `gbrain put <slug> --content <body>`. Some gbrain versions
-    # also accept stdin; we use --content for portability.
+    # Truly fire-and-forget: launch with no pipes (so buffers can't fill), then
+    # spawn a reaper task that waits up to 30s and force-kills if the write is
+    # stuck on a PGLite single-writer lock. This caller returns immediately —
+    # the reply pipeline does not wait for the put. Replaces the previous
+    # `await communicate(timeout=5s)` which blocked the hook for 5s/message
+    # and leaked detached subprocesses on every timeout.
     try:
         put_proc = await asyncio.create_subprocess_exec(
             "gbrain", "put", slug, "--content", body,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,  # detach from hook task lifecycle
+            stderr=asyncio.subprocess.DEVNULL,
         )
-        _, err = await asyncio.wait_for(put_proc.communicate(), timeout=5.0)
-        if put_proc.returncode != 0:
-            logger.warning(
-                "[signal-detector] gbrain put failed rc=%d slug=%s err=%s",
-                put_proc.returncode, slug,
-                err.decode("utf-8", errors="replace")[:200],
-            )
-    except asyncio.TimeoutError:
-        logger.warning("[signal-detector] gbrain put timeout slug=%s", slug)
     except FileNotFoundError:
         logger.warning("[signal-detector] gbrain CLI not on PATH; capture disabled")
+        return
     except Exception as e:
-        logger.warning("[signal-detector] capture error=%s slug=%s",
+        logger.warning("[signal-detector] capture spawn error=%s slug=%s",
                        type(e).__name__, slug)
+        return
+
+    async def _reap(proc, slug):
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=30.0)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+                await proc.wait()
+            except ProcessLookupError:
+                pass
+            logger.warning("[signal-detector] gbrain put hung 30s, killed slug=%s", slug)
+        except Exception:
+            pass
+
+    asyncio.create_task(_reap(put_proc, slug))
 
 
 async def handle(event_type: str, context: dict) -> None:
